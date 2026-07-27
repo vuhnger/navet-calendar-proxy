@@ -33,8 +33,10 @@ async def lifespan(app: FastAPI):
     store = FeedStore(settings)
     app.state.store = store
     app.state.settings = settings
-    await store.start()
+    # start() is inside the try: it opens an httpx connection pool, so if it
+    # raises, stop() must still run or the pool leaks.
     try:
+        await store.start()
         yield
     finally:
         await store.stop()

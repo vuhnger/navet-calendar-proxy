@@ -112,6 +112,9 @@ def build_calendar(events: list[NavetEvent], settings: Settings, *, now: datetim
         item.add("description", description)
         item.add("url", event.url)
         item.add("created", event.created)
+        # Upstream exposes no edit timestamp, only a creation time, so this cannot
+        # track real edits. SEQUENCE below is the signal that actually changes when
+        # an event is edited; clients relying on LAST-MODIFIED will not see edits.
         item.add("last-modified", event.created)
         item.add("sequence", _sequence(event, description))
         item.add("status", "CONFIRMED")

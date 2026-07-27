@@ -21,7 +21,7 @@ from pathlib import Path
 
 from .config import Settings
 from .feed import build_calendar
-from .upstream import ConvexClient, fetch_events
+from .upstream import ConvexClient, UpstreamError, fetch_events
 
 log = logging.getLogger(__name__)
 
@@ -82,11 +82,34 @@ class FeedStore:
 
     # ---- refresh ---------------------------------------------------------
 
+    def _reject_implausible_drop(self, new_count: int) -> None:
+        """Refuse a refresh that loses most of the events for no visible reason.
+
+        The dangerous upstream failure is not an outage — that raises, and we keep
+        serving the last good feed. It is a *successful* response that is empty or
+        truncated: schema drift, a renamed field, a backend bug that stops setting
+        `published`. That sails through every structural check, and a subscriber
+        that stops seeing a UID archives the event. So treat a large unexplained
+        drop as a failure rather than as news.
+        """
+        previous = self._snapshot
+        if previous is None or previous.event_count == 0:
+            return
+
+        floor = previous.event_count * self._settings.min_event_ratio
+        if new_count < floor:
+            raise UpstreamError(
+                f"refusing to publish {new_count} events after {previous.event_count} "
+                f"(below {self._settings.min_event_ratio:.0%} of the previous feed); "
+                "upstream is probably broken, keeping the last good feed"
+            )
+
     async def refresh(self) -> Snapshot:
         """Fetch upstream and rebuild the feed. Raises on failure."""
         async with self._lock:
             self.last_attempt = datetime.now(tz=UTC)
             events = await fetch_events(self._settings, self._client)
+            self._reject_implausible_drop(len(events))
             body = build_calendar(events, self._settings)
             snapshot = Snapshot(
                 body=body,
@@ -127,8 +150,10 @@ class FeedStore:
     def _load_from_disk(self) -> None:
         """Serve the previous feed immediately after a restart."""
         path = self._feed_path()
+        # read and stat together: the file can disappear between the two calls.
         try:
             body = path.read_bytes()
+            mtime = datetime.fromtimestamp(path.stat().st_mtime, tz=UTC)
         except FileNotFoundError:
             return
         except OSError as exc:
@@ -139,15 +164,17 @@ class FeedStore:
             log.warning("cached feed %s is not a calendar, ignoring", path)
             return
 
-        mtime = datetime.fromtimestamp(path.stat().st_mtime, tz=UTC)
         self._snapshot = Snapshot(
             body=body,
             etag=_etag_for(body),
             generated_at=mtime,
             event_count=body.count(b"BEGIN:VEVENT"),
         )
-        # Deliberately not setting last_success: this data is unverified until the
-        # first live refresh, so readiness still reflects real upstream health.
+        # The mtime is a real success timestamp: it is when this feed was last
+        # built from live data. Treating it as such means a restart is immediately
+        # ready (it is genuinely serving good data) and staleness still ages out
+        # normally, instead of reporting 503 until the first refresh lands.
+        self.last_success = mtime
         log.info("loaded cached feed from %s (%d events)", path, self._snapshot.event_count)
 
     def _save_to_disk(self, body: bytes) -> None:

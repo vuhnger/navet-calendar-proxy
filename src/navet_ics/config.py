@@ -75,6 +75,9 @@ class Settings:
     past_days: int = field(default_factory=lambda: _env_int("PAST_DAYS", 180, minimum=0, maximum=1825))
     # Peoply rejects a sync above 500 expanded events; stay under that ceiling.
     max_events: int = field(default_factory=lambda: _env_int("MAX_EVENTS", 400, minimum=1, maximum=10_000))
+    # Smallest fraction of the previous feed a refresh may shrink to before it is
+    # treated as upstream breakage rather than as real deletions. 0 disables it.
+    min_event_ratio: float = field(default_factory=lambda: _env_float("MIN_EVENT_RATIO", 0.5, minimum=0.0, maximum=1.0))
 
     # Persistence: last good feed survives restarts so we never serve an empty calendar.
     state_dir: str = field(default_factory=lambda: _env_str("STATE_DIR", "/var/lib/navet-ics"))

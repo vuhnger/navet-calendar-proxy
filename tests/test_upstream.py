@@ -172,6 +172,98 @@ async def test_function_level_error_is_not_retried_and_propagates():
     await client.aclose()
 
 
+async def test_client_error_is_not_retried():
+    """A 4xx will repeat identically, so retrying only delays the real error."""
+    calls = 0
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(404, text="not found")
+
+    settings = Settings()
+    object.__setattr__(settings, "http_backoff", 0.01)
+    client = ConvexClient(settings)
+    client._client = httpx.AsyncClient(base_url=settings.convex_url, transport=httpx.MockTransport(handle))
+
+    with pytest.raises(UpstreamError, match="404"):
+        await fetch_events(settings, client)
+
+    assert calls == 1
+    await client.aclose()
+
+
+async def test_rate_limit_is_retried():
+    """429 is transient, unlike the other 4xx codes."""
+    calls = 0
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return httpx.Response(429, text="slow down")
+        return responder(published=[event_payload()])(request)
+
+    settings = Settings()
+    object.__setattr__(settings, "http_backoff", 0.01)
+    client = ConvexClient(settings)
+    client._client = httpx.AsyncClient(base_url=settings.convex_url, transport=httpx.MockTransport(handle))
+
+    assert len(await fetch_events(settings, client)) == 1
+    await client.aclose()
+
+
+async def test_one_failing_semester_does_not_lose_the_others():
+    """A single broken semester query must not block every other semester."""
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        import json
+
+        body = json.loads(request.content)
+        if body["path"].endswith("getPossibleSemesters"):
+            return httpx.Response(
+                200,
+                json={
+                    "status": "success",
+                    "value": [{"semester": "vår", "year": 2026.0}, {"semester": "høst", "year": 2026.0}],
+                },
+            )
+        if body["args"]["semester"] == "vår":
+            return httpx.Response(400, text="broken")
+        return responder(published=[event_payload()])(request)
+
+    settings = Settings()
+    object.__setattr__(settings, "http_backoff", 0.01)
+    client = ConvexClient(settings)
+    client._client = httpx.AsyncClient(base_url=settings.convex_url, transport=httpx.MockTransport(handle))
+
+    events = await fetch_events(settings, client)
+
+    assert len(events) == 1
+    await client.aclose()
+
+
+async def test_every_semester_failing_raises_rather_than_returning_empty():
+    """An empty feed would archive real events downstream, so this must raise."""
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        import json
+
+        if json.loads(request.content)["path"].endswith("getPossibleSemesters"):
+            return httpx.Response(200, json={"status": "success", "value": [{"semester": "vår", "year": 2026.0}]})
+        return httpx.Response(400, text="broken")
+
+    settings = Settings()
+    object.__setattr__(settings, "http_backoff", 0.01)
+    client = ConvexClient(settings)
+    client._client = httpx.AsyncClient(base_url=settings.convex_url, transport=httpx.MockTransport(handle))
+
+    with pytest.raises(UpstreamError):
+        await fetch_events(settings, client)
+
+    await client.aclose()
+
+
 async def test_server_error_is_retried_then_raises():
     calls = 0
 

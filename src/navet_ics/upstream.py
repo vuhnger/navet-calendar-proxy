@@ -32,6 +32,10 @@ class UpstreamError(RuntimeError):
     """Raised when the upstream data could not be retrieved or made sense of."""
 
 
+class _Transient(UpstreamError):
+    """A failure worth retrying, as opposed to one that will repeat identically."""
+
+
 @dataclass(frozen=True)
 class NavetEvent:
     """A single normalized event, independent of the upstream representation."""
@@ -93,12 +97,15 @@ class ConvexClient:
                 await asyncio.sleep(delay)
             try:
                 response = await self._client.post("/api/query", json={"path": path, "args": args, "format": "json"})
-                # 5xx and 429 are worth another attempt; 4xx means we are asking wrong.
+                # 5xx and 429 are worth another attempt; a 4xx means we are asking
+                # wrong and will keep asking wrong, so fail immediately with the
+                # real status rather than burning the whole retry budget.
                 if response.status_code >= 500 or response.status_code == 429:
+                    raise _Transient(f"convex {path} returned HTTP {response.status_code}")
+                if response.status_code >= 400:
                     raise UpstreamError(f"convex {path} returned HTTP {response.status_code}")
-                response.raise_for_status()
                 payload = response.json()
-            except (httpx.HTTPError, UpstreamError, ValueError) as exc:
+            except (httpx.TransportError, _Transient, ValueError) as exc:
                 last_error = exc
                 continue
 
@@ -187,9 +194,19 @@ async def fetch_events(settings: Settings, client: ConvexClient) -> list[NavetEv
 
     cutoff = now - timedelta(days=settings.past_days)
     by_uid: dict[str, NavetEvent] = {}
+    failed: list[str] = []
 
     for semester, year in semesters:
-        value = await client.query(_Q_ALL, {"semester": semester, "year": year})
+        try:
+            value = await client.query(_Q_ALL, {"semester": semester, "year": year})
+        except UpstreamError as exc:
+            # Isolate the failure: one permanently broken semester query must not
+            # block refreshes for every other semester forever. The caller still
+            # refuses to publish if nothing at all succeeded.
+            log.error("semester %s %d failed: %s", semester, year, exc)
+            failed.append(f"{semester} {year}")
+            continue
+
         if not isinstance(value, dict):
             log.warning("unexpected payload for semester %s %d", semester, year)
             continue
@@ -205,6 +222,11 @@ async def fetch_events(settings: Settings, client: ConvexClient) -> list[NavetEv
             if event is None or event.start < cutoff:
                 continue
             by_uid[event.uid] = event
+
+    # Every semester failing means the upstream is broken, not that Navet has no
+    # events. Publishing that as an empty feed would archive real events downstream.
+    if failed and len(failed) == len(semesters):
+        raise UpstreamError(f"all {len(failed)} semester queries failed: {', '.join(failed)}")
 
     events = sorted(by_uid.values(), key=lambda e: (e.start, e.uid))
     if len(events) > settings.max_events:

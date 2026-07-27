@@ -53,6 +53,16 @@ momentarily empty feed would wipe the imported events. For the same reason the
 service returns `503` rather than an empty calendar when it has no data at all,
 and keeps serving the last good feed when upstream is down.
 
+**A refresh that loses most of the feed is rejected.** An outage is the easy case:
+it raises, and the last good feed keeps being served. The dangerous case is a
+*successful* upstream response that is empty or truncated — schema drift, a
+renamed field, a backend bug that stops setting `published`. That would pass every
+structural check and quietly archive everything downstream. So a refresh that
+shrinks the feed below `MIN_EVENT_RATIO` (default 50%) of the previous one is
+treated as breakage, not as news: it is rejected, `last_error` is set, and the
+previous feed stays live. Growth is always allowed, and the very first fetch may
+legitimately be empty.
+
 **UIDs are the Convex document id** (`<id>@ifinavet.no`), which is stable across
 refreshes, so subscribers update events in place instead of duplicating them.
 

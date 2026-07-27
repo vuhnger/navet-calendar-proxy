@@ -1,0 +1,71 @@
+[Unit]
+Description=Navet calendar proxy (ifinavet.no -> iCalendar feed)
+Documentation=https://github.com/vuhnger/navet-calendar-proxy
+After=network-online.target
+Wants=network-online.target
+# Keep retrying a crash-looping service, but slowly rather than in a tight loop.
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+[Service]
+Type=exec
+User=navet-ics
+Group=navet-ics
+
+# Creates and owns /var/lib/navet-ics, which survives restarts and holds the
+# last good feed so a cold start never serves an empty calendar.
+StateDirectory=navet-ics
+StateDirectoryMode=0750
+
+WorkingDirectory=/opt/navet-ics
+EnvironmentFile=/etc/navet-ics/navet-ics.env
+
+# Bound to loopback only; nginx terminates TLS and is the sole public entry point.
+ExecStart=/opt/navet-ics/.venv/bin/uvicorn navet_ics.app:app \
+    --host 127.0.0.1 \
+    --port 8000 \
+    --workers 1 \
+    --timeout-graceful-shutdown 20 \
+    --proxy-headers \
+    --forwarded-allow-ips 127.0.0.1 \
+    --no-access-log
+
+Restart=always
+RestartSec=5
+
+# SIGTERM lets uvicorn drain in-flight requests; the app cancels its refresh task.
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+# --- hardening -------------------------------------------------------------
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+CapabilityBoundingSet=
+AmbientCapabilities=
+UMask=0027
+
+# Resource ceilings: the workload is tiny, so cap it rather than let a fault grow.
+MemoryMax=512M
+TasksMax=64
+
+[Install]
+WantedBy=multi-user.target

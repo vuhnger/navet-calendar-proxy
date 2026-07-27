@@ -1,0 +1,91 @@
+# Ships main to the NREC host. Called from ci.yml only after every check is green.
+#
+# No value here comes from the event payload — the host, user, and keys are all
+# secrets/vars — so there is no injection surface from branch or commit text.
+name: Deploy
+
+on:
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  nrec:
+    name: NREC
+    runs-on: ubuntu-latest
+    # Two deploys at once would race on the staging directory and the rollback
+    # snapshot. A queued deploy is better than a cancelled one mid-restart.
+    concurrency:
+      group: deploy-navet-ics
+      cancel-in-progress: false
+
+    env:
+      DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
+      DEPLOY_USER: ${{ vars.DEPLOY_USER }}
+      PUBLIC_URL: ${{ vars.PUBLIC_URL }}
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Configure SSH
+        env:
+          DEPLOY_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          mkdir -m 700 -p ~/.ssh
+          printf '%s\n' "$DEPLOY_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          # Pinned host key: without this, StrictHostKeyChecking would either
+          # fail or blindly trust whatever answers on that address.
+          printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
+
+      - name: Upload release to staging
+        run: |
+          set -euo pipefail
+          rsync -az --delete \
+            --exclude '.git' \
+            --exclude '.venv' \
+            --exclude '__pycache__' \
+            --exclude '.github' \
+            -e "ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=yes -o UserKnownHostsFile=~/.ssh/known_hosts" \
+            ./ "${DEPLOY_USER}@${DEPLOY_HOST}:/srv/navet-ics/staging/"
+
+      - name: Install and restart
+        run: |
+          set -euo pipefail
+          # The only command this account may run as root. It validates the
+          # payload, installs, restarts, waits for readiness, and rolls back
+          # automatically if the new release never becomes ready.
+          ssh -i ~/.ssh/deploy_key \
+            -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile=~/.ssh/known_hosts \
+            "${DEPLOY_USER}@${DEPLOY_HOST}" \
+            'sudo /usr/local/bin/navet-ics-deploy'
+
+      - name: Verify the public feed
+        run: |
+          set -euo pipefail
+          # The server already gated on its own /readyz. This checks the whole
+          # public path — TLS, nginx, content type — the way a subscriber sees it.
+          for attempt in $(seq 1 10); do
+            status="$(curl -sS --max-time 10 -o /tmp/feed.ics -w '%{http_code}' \
+              "${PUBLIC_URL}/calendar.ics" || echo 000)"
+            echo "attempt ${attempt}: HTTP ${status}"
+
+            if [ "${status}" = "200" ] && head -c 15 /tmp/feed.ics | grep -q 'BEGIN:VCALENDAR'; then
+              echo "Feed is serving $(grep -c 'BEGIN:VEVENT' /tmp/feed.ics) events."
+              exit 0
+            fi
+            sleep 6
+          done
+
+          echo "::error::${PUBLIC_URL}/calendar.ics is not serving a valid calendar after deploy."
+          exit 1
+
+      - name: Clean up key
+        if: always()
+        run: rm -f ~/.ssh/deploy_key

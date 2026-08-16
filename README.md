@@ -26,6 +26,51 @@ are separate documents on purpose: an importer like Peoply turns every `VEVENT`
 into a platform event, so folding registration openings into the main feed would
 make every event show up twice.
 
+## Getting told about new job listings
+
+Two ways, and they complement each other.
+
+`https://navet.vuhnger.dev/jobs.xml` is an Atom feed of listings, newest posting
+first. Nothing to configure, and being pull-based it cannot miss anything.
+
+For a Slack or Discord channel, set `NOTIFY_WEBHOOK_URL` to an incoming webhook
+and each refresh posts one message per new listing:
+
+```
+Ny stillingsannonse fra Bekk
+Sommerjobb 2027
+Søk her: https://…
+```
+
+and one per registration that has just opened:
+
+```
+Påmelding åpen for Netcompany (https://ifinavet.no/events/…)
+```
+
+The format is picked from the URL's host, so a Slack webhook gets `text` and a
+Discord one gets `content` with no further configuration. That URL is a
+credential — its path is what identifies the channel — so it lives in the
+server's env file and only its host is ever logged.
+
+None of this polls: the hourly refresh already has the data, so "new" is a set
+difference against the previous one and costs no extra upstream requests. The
+tradeoff is that a listing can be up to an hour old before it is announced.
+
+Most of the design here is about not flooding the channel. The first run adopts
+everything currently published without announcing it, so switching the webhook
+on does not replay a semester of history, and the same applies if the state file
+is ever lost or unreadable. The record of what has been announced is only
+pruned for a kind that actually produced something, because job listings are
+fetched best-effort: a failed query looks exactly like "there are none", and
+forgetting on that would make the next healthy refresh announce every listing
+again. `NOTIFY_MAX_ITEMS` caps a single refresh on top of all that.
+
+Delivery is best-effort: a record counts as announced whether or not the webhook
+accepted it, because a webhook that returns after a day of downtime should not
+then dump everything it missed into the channel. That is what the Atom feed is
+for.
+
 ## The API
 
 | | |

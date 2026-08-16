@@ -146,6 +146,7 @@ def test_openapi_document_is_served_and_describes_every_endpoint(client):
         "/calendar.ics",
         "/registrations.ics",
         "/jobs.ics",
+        "/jobs.xml",
         "/api/events",
         "/api/events/{event_id}",
         "/api/companies",
@@ -196,6 +197,31 @@ def test_feeds_have_distinct_bodies(client):
     bodies = {client.get(path).content for path in ("/calendar.ics", "/registrations.ics", "/jobs.ics")}
 
     assert len(bodies) == 3
+
+
+def test_jobs_atom_feed_is_served(client):
+    response = client.get("/jobs.xml")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "application/atom+xml; charset=utf-8"
+    assert b"<feed" in response.content
+
+
+def test_jobs_atom_honours_if_none_match(client):
+    etag = client.get("/jobs.xml").headers["etag"]
+
+    assert client.get("/jobs.xml", headers={"If-None-Match": etag}).status_code == 304
+
+
+def test_jobs_atom_lists_every_listing_including_expired(client):
+    """The Atom feed is about what was posted, not about what is still open."""
+    from xml.etree.ElementTree import fromstring
+
+    feed = fromstring(client.get("/jobs.xml").content)
+    ids = {element.text for element in feed.iter("{http://www.w3.org/2005/Atom}id")}
+
+    assert "tag:ifinavet.no,2026:job/job-active" in ids
+    assert "tag:ifinavet.no,2026:job/job-expired" in ids
 
 
 # ---- events --------------------------------------------------------------

@@ -41,6 +41,15 @@ _TRUE = {"1", "true", "yes", "on"}
 _FALSE = {"0", "false", "no", "off"}
 
 
+def _env_choice(key: str, default: str, allowed: set[str]) -> str:
+    raw = os.environ.get(key, "").strip().lower()
+    if not raw:
+        return default
+    if raw not in allowed:
+        raise ValueError(f"{key} must be one of {sorted(allowed)}, got {raw!r}")
+    return raw
+
+
 def _env_bool(key: str, default: bool) -> bool:
     raw = os.environ.get(key, "").strip().lower()
     if not raw:
@@ -154,6 +163,33 @@ class Settings:
             if part.strip()
         )
     )
+
+    # Notifications. A refresh that turns up a new job listing, or an event
+    # whose registration has just opened, posts one message per record to this
+    # webhook. Empty disables the whole thing; the Atom feed still works.
+    notify_webhook_url: str = field(default_factory=lambda: _env_str("NOTIFY_WEBHOOK_URL", ""))
+    # `auto` picks slack/discord from the URL's host and falls back to a generic
+    # JSON body. Set it explicitly for anything that proxies those hosts.
+    notify_webhook_format: str = field(
+        default_factory=lambda: _env_choice("NOTIFY_WEBHOOK_FORMAT", "auto", {"auto", "slack", "discord", "json"})
+    )
+    notify_new_jobs: bool = field(default_factory=lambda: _env_bool("NOTIFY_NEW_JOBS", True))
+    notify_registration_open: bool = field(default_factory=lambda: _env_bool("NOTIFY_REGISTRATION_OPEN", True))
+    # How far back a registration opening still counts as news. This is what
+    # stops a newly loaded semester from announcing openings from months ago;
+    # it needs to comfortably exceed the refresh interval and nothing more.
+    notify_registration_window_hours: int = field(
+        default_factory=lambda: _env_int("NOTIFY_REGISTRATION_WINDOW_HOURS", 48, minimum=1, maximum=8_760)
+    )
+    # Ceiling on messages per refresh, so a bulk upstream import cannot turn
+    # into a hundred pings in a channel.
+    notify_max_items: int = field(default_factory=lambda: _env_int("NOTIFY_MAX_ITEMS", 10, minimum=1, maximum=100))
+    notify_timeout: float = field(default_factory=lambda: _env_float("NOTIFY_TIMEOUT", 10.0, minimum=1.0, maximum=60.0))
+
+    # Atom feed. Titled for what it carries (new postings) rather than reusing
+    # the calendar's name, which is about deadlines.
+    jobs_feed_title: str = field(default_factory=lambda: _env_str("JOBS_FEED_TITLE", "Navet - stillingsannonser"))
+    feed_max_items: int = field(default_factory=lambda: _env_int("FEED_MAX_ITEMS", 50, minimum=1, maximum=1_000))
 
     # JSON API paging.
     default_page_size: int = field(default_factory=lambda: _env_int("DEFAULT_PAGE_SIZE", 50, minimum=1, maximum=1_000))

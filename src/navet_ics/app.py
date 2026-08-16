@@ -7,6 +7,7 @@ and can never add load to Navet's Convex deployment.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -21,6 +22,7 @@ from . import __version__
 from .config import Settings, get_settings
 from .models import Company, CompanyPage, Event, EventPage, FeedInfo, JobListing, JobListingPage, Status
 from .store import EVENTS_FEED, FEED_PATHS, JOBS_FEED, REGISTRATIONS_FEED, FeedStore
+from .syndication import CONTENT_TYPE as SYNDICATION_CONTENT_TYPE
 
 log = logging.getLogger(__name__)
 
@@ -42,6 +44,10 @@ and as JSON.
 
 The registration and job feeds are separate documents on purpose: an importer
 that treated them as events would double what shows up on the other side.
+
+**New listings** — [`/jobs.xml`](/jobs.xml) is an Atom feed of job listings,
+newest first, for feed readers. A deployment can also post new listings and
+newly opened registrations to a Slack or Discord webhook; see `NOTIFY_WEBHOOK_URL`.
 
 **JSON** — the same data, under `/api`, including fields the calendar format has
 nowhere to put. All list endpoints page with `limit` and `offset`.
@@ -180,6 +186,48 @@ async def jobs_feed(request: Request) -> Response:
     `JOBS_PAST_DAYS` so the feed does not empty out.
     """
     return _serve_feed(request, JOBS_FEED)
+
+
+@app.get(
+    "/jobs.xml",
+    tags=["Jobs"],
+    response_class=Response,
+    responses={
+        200: {"content": {"application/atom+xml": {}}, "description": "The Atom document."},
+        304: {"description": "Unchanged since the `If-None-Match` ETag."},
+        503: {"description": "No data has been fetched yet."},
+    },
+)
+@app.head("/jobs.xml", include_in_schema=False)
+async def jobs_atom(request: Request) -> Response:
+    """Job listings as an Atom feed, newest posting first.
+
+    For reading new listings in a feed reader. Ordered by when the listing
+    appeared rather than by deadline, and unlike the webhook notifications this
+    cannot miss anything: it is the current state of the data, not a log of
+    messages someone had to successfully deliver.
+    """
+    store = _store(request)
+    settings = _settings(request)
+    body = store.jobs_atom
+
+    if body is None:
+        return JSONResponse(
+            {"detail": "Feed not available yet, try again shortly."},
+            status_code=503,
+            headers={"Retry-After": "60"},
+        )
+
+    etag = f'"{hashlib.sha256(body).hexdigest()[:32]}"'
+    headers = {
+        "Content-Type": SYNDICATION_CONTENT_TYPE,
+        "ETag": etag,
+        "Cache-Control": f"public, max-age={settings.refresh_interval // 2}",
+        "X-Feed-Stale": "true" if store.is_stale else "false",
+    }
+    if request.headers.get("if-none-match") == etag:
+        return Response(status_code=304, headers=headers)
+    return Response(content=b"" if request.method == "HEAD" else body, status_code=200, headers=headers)
 
 
 # ---- JSON API ------------------------------------------------------------

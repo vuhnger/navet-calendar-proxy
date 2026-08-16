@@ -1,9 +1,13 @@
-"""Holds the current feed and refreshes it in the background.
+"""Holds the current dataset and refreshes it in the background.
 
-The served document is always the last successfully built one. If upstream is
-unavailable the previous feed keeps being served (marked stale) rather than
+Everything served is the last successfully built version. If upstream is
+unavailable the previous data keeps being served (marked stale) rather than
 disappearing, because a subscriber that receives an empty calendar would archive
 every imported event.
+
+Request handlers never touch upstream: they read what this store already has.
+That keeps response times independent of Convex, and keeps our call volume
+against somebody else's backend proportional to time rather than to traffic.
 """
 
 from __future__ import annotations
@@ -19,13 +23,29 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
+from pydantic import ValidationError
+
 from .config import Settings
-from .feed import build_calendar
-from .upstream import ConvexClient, UpstreamError, fetch_events
+from .feed import build_calendar, build_jobs_calendar, build_registration_calendar
+from .models import DatasetDocument
+from .upstream import ConvexClient, Dataset, UpstreamCaches, UpstreamError, fetch_dataset
 
 log = logging.getLogger(__name__)
 
-_FEED_FILENAME = "calendar.ics"
+_STATE_FILENAME = "dataset.json"
+# Written by versions that only had the events feed. Still read on startup so an
+# upgrade does not begin by serving nothing.
+_LEGACY_FEED_FILENAME = "calendar.ics"
+
+EVENTS_FEED = "events"
+REGISTRATIONS_FEED = "registrations"
+JOBS_FEED = "jobs"
+
+FEED_PATHS = {
+    EVENTS_FEED: "/calendar.ics",
+    REGISTRATIONS_FEED: "/registrations.ics",
+    JOBS_FEED: "/jobs.ics",
+}
 
 
 @dataclass(frozen=True)
@@ -40,11 +60,22 @@ def _etag_for(body: bytes) -> str:
     return f'"{hashlib.sha256(body).hexdigest()[:32]}"'
 
 
+def _snapshot(body: bytes, generated_at: datetime) -> Snapshot:
+    return Snapshot(
+        body=body,
+        etag=_etag_for(body),
+        generated_at=generated_at,
+        event_count=body.count(b"BEGIN:VEVENT"),
+    )
+
+
 class FeedStore:
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
         self._client = ConvexClient(settings)
-        self._snapshot: Snapshot | None = None
+        self._caches = UpstreamCaches()
+        self._document: DatasetDocument | None = None
+        self._feeds: dict[str, Snapshot] = {}
         self._lock = asyncio.Lock()
         self._task: asyncio.Task[None] | None = None
         self._stopping = asyncio.Event()
@@ -70,8 +101,21 @@ class FeedStore:
     # ---- state -----------------------------------------------------------
 
     @property
+    def document(self) -> DatasetDocument | None:
+        """The current dataset in its published JSON shape, or None before the first build."""
+        return self._document
+
+    @property
+    def feeds(self) -> dict[str, Snapshot]:
+        return dict(self._feeds)
+
+    def feed(self, key: str) -> Snapshot | None:
+        return self._feeds.get(key)
+
+    @property
     def snapshot(self) -> Snapshot | None:
-        return self._snapshot
+        """The events feed: the one whose absence means we have nothing to serve."""
+        return self._feeds.get(EVENTS_FEED)
 
     @property
     def is_stale(self) -> bool:
@@ -91,8 +135,12 @@ class FeedStore:
         `published`. That sails through every structural check, and a subscriber
         that stops seeing a UID archives the event. So treat a large unexplained
         drop as a failure rather than as news.
+
+        Only the events feed is guarded. The other two are derived from data that
+        legitimately empties out — every registration opening and every deadline
+        eventually passes — so the same rule there would fire on healthy data.
         """
-        previous = self._snapshot
+        previous = self._feeds.get(EVENTS_FEED)
         if previous is None or previous.event_count == 0:
             return
 
@@ -104,25 +152,35 @@ class FeedStore:
                 "upstream is probably broken, keeping the last good feed"
             )
 
+    def _build(self, dataset: Dataset, generated_at: datetime) -> dict[str, Snapshot]:
+        return {
+            EVENTS_FEED: _snapshot(build_calendar(dataset.events, self._settings), generated_at),
+            REGISTRATIONS_FEED: _snapshot(build_registration_calendar(dataset.events, self._settings), generated_at),
+            JOBS_FEED: _snapshot(build_jobs_calendar(dataset.job_listings, self._settings), generated_at),
+        }
+
     async def refresh(self) -> Snapshot:
-        """Fetch upstream and rebuild the feed. Raises on failure."""
+        """Fetch upstream and rebuild everything. Raises on failure."""
         async with self._lock:
             self.last_attempt = datetime.now(tz=UTC)
-            events = await fetch_events(self._settings, self._client)
-            self._reject_implausible_drop(len(events))
-            body = build_calendar(events, self._settings)
-            snapshot = Snapshot(
-                body=body,
-                etag=_etag_for(body),
-                generated_at=datetime.now(tz=UTC).replace(microsecond=0),
-                event_count=len(events),
-            )
-            self._snapshot = snapshot
-            self.last_success = snapshot.generated_at
+            dataset = await fetch_dataset(self._settings, self._client, self._caches)
+            self._reject_implausible_drop(len(dataset.events))
+
+            generated_at = datetime.now(tz=UTC).replace(microsecond=0)
+            document = DatasetDocument.from_domain(dataset, generated_at)
+            feeds = self._build(dataset, generated_at)
+
+            self._document = document
+            self._feeds = feeds
+            self.last_success = generated_at
             self.last_error = None
-            self._save_to_disk(body)
-            log.info("feed rebuilt: %d events, %d bytes", snapshot.event_count, len(body))
-            return snapshot
+            self._save_to_disk(document)
+
+            log.info(
+                "rebuilt: %s",
+                ", ".join(f"{key} {snap.event_count} events / {len(snap.body)} bytes" for key, snap in feeds.items()),
+            )
+            return feeds[EVENTS_FEED]
 
     async def _run(self) -> None:
         while not self._stopping.is_set():
@@ -144,13 +202,58 @@ class FeedStore:
 
     # ---- persistence -----------------------------------------------------
 
-    def _feed_path(self) -> Path:
-        return Path(self._settings.state_dir) / _FEED_FILENAME
+    def _state_path(self) -> Path:
+        return Path(self._settings.state_dir) / _STATE_FILENAME
 
     def _load_from_disk(self) -> None:
-        """Serve the previous feed immediately after a restart."""
-        path = self._feed_path()
-        # read and stat together: the file can disappear between the two calls.
+        """Serve the previous data immediately after a restart."""
+        if self._load_state():
+            return
+        self._load_legacy_feed()
+
+    def _load_state(self) -> bool:
+        path = self._state_path()
+        try:
+            raw = path.read_bytes()
+            mtime = datetime.fromtimestamp(path.stat().st_mtime, tz=UTC)
+        except FileNotFoundError:
+            return False
+        except OSError as exc:
+            log.warning("could not read cached state %s: %s", path, exc)
+            return False
+
+        try:
+            document = DatasetDocument.model_validate_json(raw)
+        except ValidationError as exc:
+            # A state file this process cannot parse is one an older or newer
+            # version wrote. Refreshing will replace it; refusing to start would
+            # be worse.
+            log.warning("cached state %s is not usable, ignoring: %s", path, exc)
+            return False
+
+        self._document = document
+        self._feeds = self._build(document.to_domain(), document.generated_at)
+        # The mtime is a real success timestamp: it is when this data was last
+        # built from live data. Treating it as such means a restart is immediately
+        # ready (it is genuinely serving good data) and staleness still ages out
+        # normally, instead of reporting 503 until the first refresh lands.
+        self.last_success = mtime
+        log.info(
+            "loaded cached state from %s (%d events, %d companies, %d job listings)",
+            path,
+            len(document.events),
+            len(document.companies),
+            len(document.job_listings),
+        )
+        return True
+
+    def _load_legacy_feed(self) -> None:
+        """Read the pre-dataset calendar.ics, so an upgrade never starts empty.
+
+        Only the events feed can be recovered this way, and the JSON endpoints
+        stay empty until the first refresh — which is seconds away at startup.
+        """
+        path = Path(self._settings.state_dir) / _LEGACY_FEED_FILENAME
         try:
             body = path.read_bytes()
             mtime = datetime.fromtimestamp(path.stat().st_mtime, tz=UTC)
@@ -164,34 +267,26 @@ class FeedStore:
             log.warning("cached feed %s is not a calendar, ignoring", path)
             return
 
-        self._snapshot = Snapshot(
-            body=body,
-            etag=_etag_for(body),
-            generated_at=mtime,
-            event_count=body.count(b"BEGIN:VEVENT"),
-        )
-        # The mtime is a real success timestamp: it is when this feed was last
-        # built from live data. Treating it as such means a restart is immediately
-        # ready (it is genuinely serving good data) and staleness still ages out
-        # normally, instead of reporting 503 until the first refresh lands.
+        self._feeds = {EVENTS_FEED: _snapshot(body, mtime)}
         self.last_success = mtime
-        log.info("loaded cached feed from %s (%d events)", path, self._snapshot.event_count)
+        log.info("loaded legacy cached feed from %s (%d events)", path, self._feeds[EVENTS_FEED].event_count)
 
-    def _save_to_disk(self, body: bytes) -> None:
-        """Atomically persist the feed so a restart never serves an empty calendar."""
+    def _save_to_disk(self, document: DatasetDocument) -> None:
+        """Atomically persist the dataset so a restart never serves an empty calendar."""
         directory = Path(self._settings.state_dir)
+        payload = document.model_dump_json().encode("utf-8")
         try:
             directory.mkdir(parents=True, exist_ok=True)
-            fd, tmp_name = tempfile.mkstemp(dir=directory, prefix=".calendar-", suffix=".tmp")
+            fd, tmp_name = tempfile.mkstemp(dir=directory, prefix=".dataset-", suffix=".tmp")
             try:
                 with os.fdopen(fd, "wb") as handle:
-                    handle.write(body)
+                    handle.write(payload)
                     handle.flush()
                     os.fsync(handle.fileno())
-                os.replace(tmp_name, self._feed_path())
+                os.replace(tmp_name, self._state_path())
             except BaseException:
                 Path(tmp_name).unlink(missing_ok=True)
                 raise
         except OSError as exc:
             # Persistence is a convenience; the in-memory snapshot still serves.
-            log.warning("could not persist feed to %s: %s", directory, exc)
+            log.warning("could not persist state to %s: %s", directory, exc)

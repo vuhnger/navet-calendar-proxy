@@ -37,6 +37,21 @@ def _env_float(key: str, default: float, *, minimum: float, maximum: float) -> f
     return value
 
 
+_TRUE = {"1", "true", "yes", "on"}
+_FALSE = {"0", "false", "no", "off"}
+
+
+def _env_bool(key: str, default: bool) -> bool:
+    raw = os.environ.get(key, "").strip().lower()
+    if not raw:
+        return default
+    if raw in _TRUE:
+        return True
+    if raw in _FALSE:
+        return False
+    raise ValueError(f"{key} must be one of {sorted(_TRUE | _FALSE)}, got {raw!r}")
+
+
 @dataclass(frozen=True)
 class Settings:
     """Runtime settings, resolved once at startup."""
@@ -61,6 +76,29 @@ class Settings:
         default_factory=lambda: _env_int("REFRESH_JITTER_SECONDS", 120, minimum=0, maximum=3600)
     )
 
+    # How many upstream calls may be in flight at once during a refresh. The
+    # enrichment steps below fan out per company and per event, and this is
+    # somebody else's Convex deployment: stay a polite client.
+    upstream_concurrency: int = field(
+        default_factory=lambda: _env_int("UPSTREAM_CONCURRENCY", 4, minimum=1, maximum=16)
+    )
+
+    # Enrichment. Each of these costs extra upstream calls per refresh, so each
+    # can be turned off independently if Navet's backend ever needs the quiet.
+    #
+    # Organizer lookups are the expensive one: one query per event, every
+    # refresh, because upstream exposes no bulk organizer query.
+    fetch_organizers: bool = field(default_factory=lambda: _env_bool("FETCH_ORGANIZERS", True))
+    max_organizer_lookups: int = field(
+        default_factory=lambda: _env_int("MAX_ORGANIZER_LOOKUPS", 250, minimum=0, maximum=5_000)
+    )
+    # Organizer e-mail addresses are personal data about Navet volunteers that
+    # upstream happens to expose. Republishing them on a public endpoint is a
+    # decision for whoever runs this service, so it is off unless asked for.
+    include_organizer_emails: bool = field(default_factory=lambda: _env_bool("INCLUDE_ORGANIZER_EMAILS", False))
+    fetch_companies: bool = field(default_factory=lambda: _env_bool("FETCH_COMPANIES", True))
+    fetch_job_listings: bool = field(default_factory=lambda: _env_bool("FETCH_JOB_LISTINGS", True))
+
     # Feed contents.
     calendar_name: str = field(default_factory=lambda: _env_str("CALENDAR_NAME", "Navet - arrangementer"))
     calendar_description: str = field(
@@ -68,16 +106,58 @@ class Settings:
             "CALENDAR_DESCRIPTION", "Arrangementer fra Navet, linjeforeningen for informatikk ved UiO."
         )
     )
+    registration_calendar_name: str = field(
+        default_factory=lambda: _env_str("REGISTRATION_CALENDAR_NAME", "Navet - påmeldingsåpninger")
+    )
+    registration_calendar_description: str = field(
+        default_factory=lambda: _env_str(
+            "REGISTRATION_CALENDAR_DESCRIPTION", "Når påmeldingen åpner for Navets arrangementer."
+        )
+    )
+    jobs_calendar_name: str = field(default_factory=lambda: _env_str("JOBS_CALENDAR_NAME", "Navet - søknadsfrister"))
+    jobs_calendar_description: str = field(
+        default_factory=lambda: _env_str("JOBS_CALENDAR_DESCRIPTION", "Søknadsfrister for stillinger utlyst hos Navet.")
+    )
     timezone: str = field(default_factory=lambda: _env_str("CALENDAR_TIMEZONE", "Europe/Oslo"))
     default_duration_minutes: int = field(
         default_factory=lambda: _env_int("DEFAULT_DURATION_MINUTES", 120, minimum=5, maximum=1440)
     )
+    # Registration openings and application deadlines are instants, not blocks.
+    # They still need a non-zero length or some clients render nothing at all.
+    reminder_duration_minutes: int = field(
+        default_factory=lambda: _env_int("REMINDER_DURATION_MINUTES", 30, minimum=1, maximum=1440)
+    )
+    # Minutes of VALARM lead time in the reminder feeds. 0 emits no alarm.
+    reminder_alarm_minutes: int = field(
+        default_factory=lambda: _env_int("REMINDER_ALARM_MINUTES", 15, minimum=0, maximum=10_080)
+    )
     past_days: int = field(default_factory=lambda: _env_int("PAST_DAYS", 180, minimum=0, maximum=1825))
+    jobs_past_days: int = field(default_factory=lambda: _env_int("JOBS_PAST_DAYS", 180, minimum=0, maximum=1825))
     # Peoply rejects a sync above 500 expanded events; stay under that ceiling.
     max_events: int = field(default_factory=lambda: _env_int("MAX_EVENTS", 400, minimum=1, maximum=10_000))
+    max_jobs: int = field(default_factory=lambda: _env_int("MAX_JOBS", 400, minimum=1, maximum=10_000))
     # Smallest fraction of the previous feed a refresh may shrink to before it is
     # treated as upstream breakage rather than as real deletions. 0 disables it.
     min_event_ratio: float = field(default_factory=lambda: _env_float("MIN_EVENT_RATIO", 0.5, minimum=0.0, maximum=1.0))
+
+    # Company logos, emitted as RFC 7986 IMAGE. Resolving one costs a query per
+    # company whose logo we have not seen before, plus a HEAD to learn the media
+    # type. Both are cached on identifiers that change when the logo changes.
+    event_images: bool = field(default_factory=lambda: _env_bool("EVENT_IMAGES", True))
+    # Media types worth emitting. SVG is deliberately absent: several clients
+    # (and Peoply's importer) will not render it, so pointing them at one is
+    # worse than emitting no image at all.
+    image_types: tuple[str, ...] = field(
+        default_factory=lambda: tuple(
+            part.strip().lower()
+            for part in _env_str("IMAGE_TYPES", "image/jpeg,image/png,image/webp").split(",")
+            if part.strip()
+        )
+    )
+
+    # JSON API paging.
+    default_page_size: int = field(default_factory=lambda: _env_int("DEFAULT_PAGE_SIZE", 50, minimum=1, maximum=1_000))
+    max_page_size: int = field(default_factory=lambda: _env_int("MAX_PAGE_SIZE", 200, minimum=1, maximum=5_000))
 
     # Persistence: last good feed survives restarts so we never serve an empty calendar.
     state_dir: str = field(default_factory=lambda: _env_str("STATE_DIR", "/var/lib/navet-ics"))

@@ -13,7 +13,7 @@ import pytest
 
 from navet_ics.config import Settings
 from navet_ics.store import FeedStore, _etag_for
-from navet_ics.upstream import NavetEvent, UpstreamError
+from navet_ics.upstream import Dataset, NavetEvent, NavetJobListing, UpstreamError
 
 
 def make_events(count: int) -> list[NavetEvent]:
@@ -45,11 +45,35 @@ def store(tmp_path, monkeypatch) -> FeedStore:
     return FeedStore(settings)
 
 
-def stub_fetch(store: FeedStore, monkeypatch, events: list[NavetEvent]) -> None:
-    async def fake_fetch(settings, client):
-        return events
+def make_jobs(count: int) -> list[NavetJobListing]:
+    return [
+        NavetJobListing(
+            uid=f"job-{index}",
+            title=f"Sommerjobb {index}",
+            kind="Sommerjobb",
+            teaser="",
+            description_html="",
+            application_url=None,
+            deadline=datetime(2026, 3, 1, 23, 59, tzinfo=UTC),
+            company_id="company-1",
+            company="Bekk",
+            url=f"https://ifinavet.no/job/job-{index}",
+            created=datetime(2026, 1, 1, tzinfo=UTC),
+        )
+        for index in range(count)
+    ]
 
-    monkeypatch.setattr("navet_ics.store.fetch_events", fake_fetch)
+
+def stub_fetch(
+    store: FeedStore,
+    monkeypatch,
+    events: list[NavetEvent],
+    job_listings: list[NavetJobListing] | None = None,
+) -> None:
+    async def fake_fetch(settings, client, caches):
+        return Dataset(events=events, job_listings=job_listings or [])
+
+    monkeypatch.setattr("navet_ics.store.fetch_dataset", fake_fetch)
 
 
 async def test_refresh_publishes_events(store, monkeypatch):
@@ -126,10 +150,10 @@ async def test_refresh_loop_survives_upstream_failure(store, monkeypatch):
     stub_fetch(store, monkeypatch, make_events(5))
     await store.refresh()
 
-    async def boom(settings, client):
+    async def boom(settings, client, caches):
         raise UpstreamError("convex is down")
 
-    monkeypatch.setattr("navet_ics.store.fetch_events", boom)
+    monkeypatch.setattr("navet_ics.store.fetch_dataset", boom)
     with pytest.raises(UpstreamError):
         await store.refresh()
 

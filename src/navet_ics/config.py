@@ -167,7 +167,15 @@ class Settings:
     # Notifications. A refresh that turns up a new job listing, or an event
     # whose registration has just opened, posts one message per record to this
     # webhook. Empty disables the whole thing; the Atom feed still works.
+    # A shared fallback, used for any kind that has no channel of its own.
     notify_webhook_url: str = field(default_factory=lambda: _env_str("NOTIFY_WEBHOOK_URL", ""))
+    # Per-kind overrides. Job ads and bedpres usually belong in different
+    # channels, and an incoming webhook URL is bound to one channel, so routing
+    # means one URL per kind rather than one URL plus a channel name.
+    notify_jobs_webhook_url: str = field(default_factory=lambda: _env_str("NOTIFY_JOBS_WEBHOOK_URL", ""))
+    notify_registration_webhook_url: str = field(
+        default_factory=lambda: _env_str("NOTIFY_REGISTRATION_WEBHOOK_URL", "")
+    )
     # `auto` picks slack/discord from the URL's host and falls back to a generic
     # JSON body. Set it explicitly for anything that proxies those hosts.
     notify_webhook_format: str = field(

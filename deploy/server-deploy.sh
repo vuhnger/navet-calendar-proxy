@@ -14,6 +14,9 @@ HEALTH_URL=http://127.0.0.1:8000/readyz
 # The nginx files this deploy owns. The site config is deliberately absent: see
 # the note further down.
 SNIPPETS=(navet-ics-proxy.conf navet-ics-locations.conf)
+# Snippets this run created rather than replaced. Declared before the ERR trap
+# is installed, because rollback reads it and may fire at any point after that.
+INSTALLED_SNIPPETS=()
 
 log() { printf '==> %s\n' "$*"; }
 
@@ -62,6 +65,11 @@ restore_snippets() {
     for snippet in "${SNIPPETS[@]}"; do
         if [[ -f "$ROLLBACK/snippets/$snippet" ]]; then
             cp -a "$ROLLBACK/snippets/$snippet" "/etc/nginx/snippets/$snippet" || true
+        elif [[ " ${INSTALLED_SNIPPETS[*]} " == *" $snippet "* ]]; then
+            # No backup because this deploy introduced the file. Leaving a
+            # snippet nginx just rejected on disk is what breaks the next
+            # reload, so remove it rather than restore it.
+            rm -f "/etc/nginx/snippets/$snippet"
         fi
     done
 }
@@ -97,6 +105,8 @@ for snippet in "${SNIPPETS[@]}"; do
         log "Updating nginx snippet $snippet"
         if [[ -f "/etc/nginx/snippets/$snippet" ]]; then
             cp -a "/etc/nginx/snippets/$snippet" "$ROLLBACK/snippets/$snippet"
+        else
+            INSTALLED_SNIPPETS+=("$snippet")
         fi
         cp "$STAGING/deploy/$snippet" "/etc/nginx/snippets/$snippet"
         nginx_dirty=1

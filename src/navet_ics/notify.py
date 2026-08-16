@@ -52,11 +52,18 @@ def _redacted(url: str) -> str:
     return f"{parts.scheme}://{host}{port}/…"
 
 
+JOB = "job"
+REGISTRATION = "registration"
+KINDS = (JOB, REGISTRATION)
+
+
 @dataclass(frozen=True)
 class Announcement:
     """One message to post, plus the key that stops it being posted twice."""
 
     key: str
+    # Which kind this is, so it can be routed to its own channel.
+    kind: str
     text: str
     # Kept alongside the rendered text so the generic JSON format can expose the
     # parts without a consumer having to parse the message back apart.
@@ -82,7 +89,12 @@ class NotificationState:
     @classmethod
     def from_json(cls, raw: bytes) -> NotificationState:
         payload = json.loads(raw)
-        if not isinstance(payload, dict) or payload.get("version") != _STATE_VERSION:
+        # Checked before anything reads a key off it: a file holding a JSON list
+        # or string is as plausible a corruption as a truncated object, and
+        # .get() on one raises a type the caller does not expect.
+        if not isinstance(payload, dict):
+            raise ValueError(f"notification state is a {type(payload).__name__}, not an object")
+        if payload.get("version") != _STATE_VERSION:
             raise ValueError(f"unsupported notification state version {payload.get('version')!r}")
         seen = payload.get("seen")
         if not isinstance(seen, list):
@@ -94,7 +106,8 @@ def _job_announcement(listing: NavetJobListing) -> Announcement:
     company = listing.company or "Ukjent bedrift"
     url = listing.application_url or listing.url
     return Announcement(
-        key=f"job:{listing.uid}",
+        key=f"{JOB}:{listing.uid}",
+        kind=JOB,
         text=f"Ny stillingsannonse fra {company}\n{listing.title}\nSøk her: {url}",
         company=company,
         title=listing.title,
@@ -106,7 +119,8 @@ def _registration_announcement(event: NavetEvent) -> Announcement:
     company = event.company or event.title
     url = event.external_url or event.url
     return Announcement(
-        key=f"registration:{event.uid}",
+        key=f"{REGISTRATION}:{event.uid}",
+        kind=REGISTRATION,
         text=f"Påmelding åpen for {company} ({url})",
         company=company,
         title=event.title,
@@ -183,7 +197,8 @@ def _prune(state: NotificationState, live_keys: set[str]) -> None:
     prevent. Keeping a stale key costs a few bytes; dropping one costs a channel
     full of history.
     """
-    for prefix in ("job:", "registration:"):
+    for kind in KINDS:
+        prefix = f"{kind}:"
         live = {key for key in live_keys if key.startswith(prefix)}
         if not live:
             continue
@@ -249,19 +264,31 @@ class Notifier:
 
     # ---- delivery --------------------------------------------------------
 
-    def _format(self) -> str:
+    def webhook_for(self, kind: str) -> str:
+        """The webhook a kind posts to: its own if set, otherwise the shared one.
+
+        Two channels is the normal setup (job ads and bedpres go to different
+        places), but a single NOTIFY_WEBHOOK_URL still works for both.
+        """
+        specific = {
+            JOB: self._settings.notify_jobs_webhook_url,
+            REGISTRATION: self._settings.notify_registration_webhook_url,
+        }.get(kind, "")
+        return specific or self._settings.notify_webhook_url
+
+    def _format(self, url: str) -> str:
         configured = self._settings.notify_webhook_format
         if configured != "auto":
             return configured
-        host = urlsplit(self._settings.notify_webhook_url).netloc.lower()
-        if host.endswith("slack.com"):
+        host = (urlsplit(url).hostname or "").lower()
+        if host == "slack.com" or host.endswith(".slack.com"):
             return "slack"
-        if host.endswith(("discord.com", "discordapp.com")):
+        if host in {"discord.com", "discordapp.com"} or host.endswith((".discord.com", ".discordapp.com")):
             return "discord"
         return "json"
 
-    def _payload(self, announcement: Announcement) -> dict:
-        style = self._format()
+    def _payload(self, announcement: Announcement, url: str) -> dict:
+        style = self._format(url)
         if style == "slack":
             return {"text": announcement.text}
         if style == "discord":
@@ -275,17 +302,27 @@ class Notifier:
         }
 
     async def deliver(self, announcements: list[Announcement]) -> None:
-        """Post each announcement to the configured webhook. Never raises.
+        """Post each announcement to its kind's webhook. Never raises.
 
         One request per announcement, so each lands in Slack as its own message
         rather than as a wall of text. `plan` has already applied the per-refresh
         cap, and deliberately did not mark the overflow as announced, so the
         remainder arrives on later refreshes instead of being dropped here.
+
+        Each kind is delivered independently: a dead job-ads webhook must not
+        stop the bedpres channel from being told anything.
         """
-        url = self._settings.notify_webhook_url
-        if not url or not announcements:
+        if not announcements:
             return
 
+        for kind in KINDS:
+            batch = [a for a in announcements if a.kind == kind]
+            url = self.webhook_for(kind)
+            if not batch or not url:
+                continue
+            await self._deliver_batch(url, batch)
+
+    async def _deliver_batch(self, url: str, announcements: list[Announcement]) -> None:
         if self._client is None:
             self._client = httpx.AsyncClient(
                 timeout=httpx.Timeout(self._settings.notify_timeout),
@@ -296,18 +333,19 @@ class Notifier:
         delivered = 0
         for announcement in announcements:
             try:
-                response = await self._client.post(url, json=self._payload(announcement))
+                response = await self._client.post(url, json=self._payload(announcement, url))
             except httpx.HTTPError as exc:
                 log.warning("notification webhook %s failed: %s", _redacted(url), exc)
                 # One failure usually means the whole endpoint is down; stop
                 # rather than spending the timeout budget on each remaining item.
-                return
+                break
             if response.status_code >= 400:
                 log.warning("notification webhook %s returned HTTP %d", _redacted(url), response.status_code)
-                return
+                break
             delivered += 1
 
-        log.info("announced %d record(s) to %s", delivered, _redacted(url))
+        if delivered:
+            log.info("announced %d record(s) to %s", delivered, _redacted(url))
 
     async def aclose(self) -> None:
         if self._client is not None:

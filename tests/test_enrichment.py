@@ -223,8 +223,54 @@ async def test_images_can_be_switched_off_entirely():
     dataset = await fetch_dataset(settings, client, UpstreamCaches())
 
     assert dataset.events[0].image_url is None
+    assert dataset.companies[0].image_url is None
+    # Job listings are the trap here: upstream hands them a resolved logo URL,
+    # so "do not publish images" has to actively clear it rather than merely
+    # skip the resolution step.
+    assert dataset.job_listings[0].image_url is None
+    assert dataset.job_listings[0].image_type is None
     assert upstream.head_calls == []
     assert "companies/queries:getById" not in upstream.calls
+    await client.aclose()
+
+
+async def test_job_logo_is_still_format_checked_when_images_are_on():
+    """The free URL on a job listing must not bypass the IMAGE_TYPES filter."""
+    settings = make_settings(event_images=True, fetch_organizers=False)
+    upstream = Upstream(media_type="image/svg+xml")
+    client = upstream.client(settings)
+
+    dataset = await fetch_dataset(settings, client, UpstreamCaches())
+
+    assert dataset.job_listings[0].image_url is None
+    await client.aclose()
+
+
+async def test_a_failed_media_probe_is_retried_rather_than_cached():
+    """Caching a failure would turn one bad minute into a permanent regression."""
+    settings = make_settings(fetch_organizers=False)
+    upstream = Upstream()
+    caches = UpstreamCaches()
+
+    failing = True
+
+    def sometimes(request: httpx.Request) -> httpx.Response:
+        if request.method == "HEAD" and failing:
+            upstream.head_calls.append(str(request.url))
+            return httpx.Response(500)
+        return upstream.handle(request)
+
+    client = ConvexClient(settings)
+    client._client = httpx.AsyncClient(base_url=CONVEX, transport=httpx.MockTransport(sometimes))
+
+    first = await fetch_dataset(settings, client, caches)
+    assert first.events[0].image_url is None
+    assert caches.media_type_by_url == {}
+
+    failing = False
+    second = await fetch_dataset(settings, client, caches)
+
+    assert second.events[0].image_type == "image/png"
     await client.aclose()
 
 

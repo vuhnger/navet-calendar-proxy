@@ -223,14 +223,17 @@ class ConvexClient:
         The URL comes from upstream data rather than from us, so it is pinned to
         the configured Convex host before being requested: a compromised or
         buggy backend must not be able to point this service at an arbitrary
-        address. Failures are not retried — an image is a nice-to-have, and the
-        refresh must not slow down or fail over one.
+        address. Redirects stay off for the same reason — pinning only the first
+        hop would let a 302 walk us straight off the host we just checked, and
+        Convex storage serves these directly anyway. Failures are not retried —
+        an image is a nice-to-have, and the refresh must not slow down or fail
+        over one.
         """
         if urlsplit(url).netloc != urlsplit(self._settings.convex_url).netloc:
             log.warning("ignoring off-host asset url %s", url)
             return None
         try:
-            response = await self._client.head(url, follow_redirects=True)
+            response = await self._client.head(url)
         except httpx.HTTPError as exc:
             log.warning("could not probe asset %s: %s", url, exc)
             return None
@@ -519,6 +522,12 @@ async def _resolve_media_types(
             if isinstance(result, BaseException):
                 log.warning("could not probe %s: %s", url, result)
                 continue
+            if result is None:
+                # `media_type` answers None for a failed probe as well as for a
+                # response with no usable Content-Type. Caching that would turn
+                # one bad minute into a permanently image-less company, so leave
+                # it out and let the next refresh ask again.
+                continue
             caches.media_type_by_url[url] = result
 
     return {url: media for url in urls if (media := caches.media_type_by_url.get(url))}
@@ -616,6 +625,12 @@ async def fetch_dataset(settings: Settings, client: ConvexClient, caches: Upstre
         companies = [_with_asset(company, *asset(company.id)) for company in companies]
         events = [_with_asset(event, *asset(event.company_id)) for event in events]
         job_listings = [_with_asset(job, *asset(job.company_id)) for job in job_listings]
+    else:
+        # Job listings are the one record type that arrives with a logo URL
+        # already resolved, so they need clearing explicitly. Leaving it would
+        # publish an image nothing had checked the format of, from the code path
+        # whose whole job is to publish no images.
+        job_listings = [_with_asset(job, None, None) for job in job_listings]
 
     if settings.fetch_organizers and events:
         organizers = await _fetch_organizers(settings, client, events)

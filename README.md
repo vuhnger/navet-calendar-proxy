@@ -4,6 +4,11 @@ Exposes the public data behind [ifinavet.no](https://ifinavet.no/events) as
 subscribable iCalendar feeds and as a read-only JSON API, so it can be pulled
 into other student platforms.
 
+### → API documentation: **<https://navet.vuhnger.dev/docs>**
+
+Browsable, with every endpoint, parameter and response shape. Generated from the
+code, so it cannot drift from what the service actually does.
+
 ## The feeds
 
 ```
@@ -21,17 +26,17 @@ are separate documents on purpose: an importer like Peoply turns every `VEVENT`
 into a platform event, so folding registration openings into the main feed would
 make every event show up twice.
 
-## API documentation
+## The API
 
-**<https://navet.vuhnger.dev/docs>** — browsable, and generated from the code, so
-it cannot drift from what the service actually does. [ReDoc](https://navet.vuhnger.dev/redoc)
-renders the same thing in a different layout, and
-[`/openapi.json`](https://navet.vuhnger.dev/openapi.json) is the machine-readable
-source both are built from.
+| | |
+| --- | --- |
+| [`/docs`](https://navet.vuhnger.dev/docs) | Swagger UI. Browsable, and you can call the endpoints from the page. |
+| [`/redoc`](https://navet.vuhnger.dev/redoc) | The same thing in a reading-oriented layout. |
+| [`/openapi.json`](https://navet.vuhnger.dev/openapi.json) | The machine-readable schema both are rendered from. |
 
-There is deliberately no endpoint table in this README. It would be a second
-description of the same thing, maintained by hand, and it would be wrong within
-a month.
+All three are generated from the code at runtime, so there is deliberately no
+endpoint table in this README. One would be a second description of the same
+thing, maintained by hand, and it would be wrong within a month.
 
 Everything under `/api` returns JSON, including fields the calendar format has
 nowhere to put: registration times, seat counts, organizers, company logos, the

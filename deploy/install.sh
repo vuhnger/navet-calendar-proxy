@@ -74,6 +74,9 @@ systemctl restart navet-ics.service
 echo "==> Configuring nginx"
 install -d -m 0755 /etc/nginx/snippets /var/www/html
 cp "$SRC_DIR/deploy/navet-ics-proxy.conf" /etc/nginx/snippets/navet-ics-proxy.conf
+# The routes. Safe to overwrite on every run, unlike the site file below, which
+# is why they live here rather than inline in it.
+cp "$SRC_DIR/deploy/navet-ics-locations.conf" /etc/nginx/snippets/navet-ics-locations.conf
 # Never overwrite an existing site file: certbot edits it in place to add TLS.
 if [[ ! -f /etc/nginx/sites-available/navet-ics.conf ]]; then
     sed "s/SERVER_NAME_PLACEHOLDER/$SERVER_NAME/g" "$SRC_DIR/deploy/nginx.conf" \

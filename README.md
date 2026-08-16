@@ -57,14 +57,19 @@ None of this polls: the hourly refresh already has the data, so "new" is a set
 difference against the previous one and costs no extra upstream requests. The
 tradeoff is that a listing can be up to an hour old before it is announced.
 
-Two things stop it becoming a flood. The first run adopts everything currently
-published without announcing it, so switching the webhook on does not replay a
-semester of history, and the same applies if the state file is ever lost or
-unreadable. And `NOTIFY_MAX_ITEMS` caps how many messages a single refresh may
-send. Delivery is best-effort: a record counts as announced whether or not the
-webhook accepted it, because a webhook that returns after a day of downtime
-should not then dump everything it missed into the channel. That is what the
-Atom feed is for.
+Most of the design here is about not flooding the channel. The first run adopts
+everything currently published without announcing it, so switching the webhook
+on does not replay a semester of history, and the same applies if the state file
+is ever lost or unreadable. The record of what has been announced is only
+pruned for a kind that actually produced something, because job listings are
+fetched best-effort: a failed query looks exactly like "there are none", and
+forgetting on that would make the next healthy refresh announce every listing
+again. `NOTIFY_MAX_ITEMS` caps a single refresh on top of all that.
+
+Delivery is best-effort: a record counts as announced whether or not the webhook
+accepted it, because a webhook that returns after a day of downtime should not
+then dump everything it missed into the channel. That is what the Atom feed is
+for.
 
 ## The API
 

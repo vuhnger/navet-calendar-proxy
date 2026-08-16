@@ -196,6 +196,52 @@ def test_state_does_not_grow_without_bound():
     assert state.seen == {"job:job-1"}
 
 
+def test_a_failed_job_fetch_does_not_wipe_what_was_already_announced():
+    """Job listings are enriched best-effort, so a failed query looks like "none".
+
+    Pruning on that would make the next healthy refresh announce every listing
+    again, which is the flood this state exists to prevent.
+    """
+    settings = make_settings()
+    state = bootstrapped()
+    state.seen |= {"job:job-1", "job:job-2"}
+
+    # The events fetch succeeded; the job listings one came back empty.
+    plan(settings, Dataset(events=[make_event()], job_listings=[]), state, now=NOW)
+    assert state.seen >= {"job:job-1", "job:job-2"}
+
+    # ...and when it recovers, nothing is announced as new.
+    recovered = Dataset(job_listings=[make_job("job-1"), make_job("job-2")])
+    assert plan(settings, recovered, state, now=NOW) == []
+
+
+def test_switching_a_kind_off_and_on_again_does_not_flood():
+    settings_on = make_settings()
+    settings_off = make_settings(notify_new_jobs=False)
+    dataset = Dataset(job_listings=[make_job("job-1"), make_job("job-2")])
+    state = bootstrapped()
+
+    plan(settings_on, dataset, state, now=NOW)
+    # A few refreshes with job notifications turned off...
+    plan(settings_off, dataset, state, now=NOW)
+    plan(settings_off, dataset, state, now=NOW)
+
+    # ...must not make the listings look new again when it comes back on.
+    assert plan(settings_on, dataset, state, now=NOW) == []
+
+
+def test_pruning_one_kind_does_not_disturb_the_other():
+    settings = make_settings()
+    state = bootstrapped()
+    state.seen |= {"job:gone", "registration:event-1"}
+    dataset = Dataset(events=[make_event()], job_listings=[make_job()])
+
+    plan(settings, dataset, state, now=NOW)
+
+    assert "job:gone" not in state.seen
+    assert "registration:event-1" in state.seen
+
+
 # ---- state file ----------------------------------------------------------
 
 

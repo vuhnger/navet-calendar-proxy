@@ -132,9 +132,7 @@ def plan(
         )
 
     live_keys = {candidate.key for candidate in candidates}
-    # Keys for records no longer in the dataset are dropped, so the file stays
-    # proportional to what is live rather than to how long the service has run.
-    state.seen &= live_keys
+    _prune(state, live_keys)
 
     if not state.bootstrapped:
         # First run: adopt the world as it is, silently.
@@ -146,6 +144,25 @@ def plan(
     fresh = [candidate for candidate in candidates if candidate.key not in state.seen]
     state.seen |= live_keys
     return fresh
+
+
+def _prune(state: NotificationState, live_keys: set[str]) -> None:
+    """Drop keys for records that have genuinely fallen out of the dataset.
+
+    Done per kind, and only for a kind that produced something this round. The
+    two ways a kind can come up empty without anything having been withdrawn are
+    both real: job listings are enriched best-effort, so a failed upstream query
+    yields an empty list, and either kind can simply be switched off. Pruning on
+    that would make the *next* healthy refresh treat every record as new and
+    announce the lot, which is the exact flood this state file exists to
+    prevent. Keeping a stale key costs a few bytes; dropping one costs a channel
+    full of history.
+    """
+    for prefix in ("job:", "registration:"):
+        live = {key for key in live_keys if key.startswith(prefix)}
+        if not live:
+            continue
+        state.seen = {key for key in state.seen if not key.startswith(prefix)} | live & state.seen
 
 
 class Notifier:

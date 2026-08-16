@@ -86,6 +86,36 @@ jobs:
           echo "::error::${PUBLIC_URL}/calendar.ics is not serving a valid calendar after deploy."
           exit 1
 
+      - name: Verify the rest of the public surface
+        run: |
+          set -euo pipefail
+          # nginx serves an explicit allowlist of paths, so a route that exists in
+          # the app can still be a 404 in production. Checking each one here is
+          # what catches a location block that was never added.
+          failed=0
+
+          for path in /registrations.ics /jobs.ics; do
+            status="$(curl -sS --max-time 10 -o /tmp/check.ics -w '%{http_code}' "${PUBLIC_URL}${path}" || echo 000)"
+            if [ "${status}" = "200" ] && head -c 15 /tmp/check.ics | grep -q 'BEGIN:VCALENDAR'; then
+              echo "${path}: OK ($(grep -c 'BEGIN:VEVENT' /tmp/check.ics) events)"
+            else
+              echo "::error::${PUBLIC_URL}${path} returned HTTP ${status} and no calendar."
+              failed=1
+            fi
+          done
+
+          for path in /api/events /api/companies /api/jobs /api/status /openapi.json /docs; do
+            status="$(curl -sS --max-time 10 -o /dev/null -w '%{http_code}' "${PUBLIC_URL}${path}" || echo 000)"
+            if [ "${status}" = "200" ]; then
+              echo "${path}: OK"
+            else
+              echo "::error::${PUBLIC_URL}${path} returned HTTP ${status}."
+              failed=1
+            fi
+          done
+
+          exit "${failed}"
+
       - name: Clean up key
         if: always()
         run: rm -f ~/.ssh/deploy_key

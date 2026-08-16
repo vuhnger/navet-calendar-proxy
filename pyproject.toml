@@ -1,7 +1,7 @@
 [project]
 name = "navet-calendar-proxy"
-version = "1.0.0"
-description = "Exposes ifinavet.no events as a subscribable iCalendar feed"
+version = "2.0.0"
+description = "Exposes ifinavet.no events as subscribable iCalendar feeds and a JSON API"
 readme = "README.md"
 requires-python = ">=3.11"
 # Pinned exactly; uv.lock records the resolved graph and hashes on top of this.

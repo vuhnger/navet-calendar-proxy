@@ -35,9 +35,21 @@ _STATE_VERSION = 1
 
 
 def _redacted(url: str) -> str:
-    """A webhook URL identifies its channel by a secret path; never log the path."""
-    parts = urlsplit(url)
-    return f"{parts.scheme}://{parts.netloc}/…" if parts.netloc else "<invalid url>"
+    """Host only. A webhook URL is a credential twice over.
+
+    The path is what identifies the channel, and `netloc` would carry any
+    `user:password@` the operator put in the URL, so this is built from the
+    hostname rather than from either.
+    """
+    try:
+        parts = urlsplit(url)
+        host = parts.hostname
+    except ValueError:
+        return "<invalid url>"
+    if not host:
+        return "<invalid url>"
+    port = f":{parts.port}" if parts.port else ""
+    return f"{parts.scheme}://{host}{port}/…"
 
 
 @dataclass(frozen=True)
@@ -142,8 +154,21 @@ def plan(
         return []
 
     fresh = [candidate for candidate in candidates if candidate.key not in state.seen]
-    state.seen |= live_keys
-    return fresh
+    sending = fresh[: settings.notify_max_items]
+    if len(fresh) > len(sending):
+        # The rest stay unmarked on purpose, so the next refresh picks them up.
+        # Marking them here would cap the burst by silently dropping the
+        # remainder, which is not what a cap should mean.
+        log.info(
+            "announcing %d of %d new record(s); %d deferred to the next refresh",
+            len(sending),
+            len(fresh),
+            len(fresh) - len(sending),
+        )
+
+    # Only what is actually being announced is recorded as announced.
+    state.seen |= {candidate.key for candidate in sending}
+    return sending
 
 
 def _prune(state: NotificationState, live_keys: set[str]) -> None:
@@ -253,20 +278,13 @@ class Notifier:
         """Post each announcement to the configured webhook. Never raises.
 
         One request per announcement, so each lands in Slack as its own message
-        rather than as a wall of text. Capped per refresh: if upstream ever
-        publishes fifty listings at once, a channel does not want fifty pings.
+        rather than as a wall of text. `plan` has already applied the per-refresh
+        cap, and deliberately did not mark the overflow as announced, so the
+        remainder arrives on later refreshes instead of being dropped here.
         """
         url = self._settings.notify_webhook_url
         if not url or not announcements:
             return
-
-        shown = announcements[: self._settings.notify_max_items]
-        if len(announcements) > len(shown):
-            log.warning(
-                "capping announcements at %d; %d not sent this refresh",
-                self._settings.notify_max_items,
-                len(announcements) - len(shown),
-            )
 
         if self._client is None:
             self._client = httpx.AsyncClient(
@@ -276,7 +294,7 @@ class Notifier:
             )
 
         delivered = 0
-        for announcement in shown:
+        for announcement in announcements:
             try:
                 response = await self._client.post(url, json=self._payload(announcement))
             except httpx.HTTPError as exc:

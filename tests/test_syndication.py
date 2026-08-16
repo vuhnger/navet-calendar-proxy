@@ -66,7 +66,20 @@ def test_entries_are_newest_posting_first(settings):
     feed = parse(build_jobs_atom(listings, settings, now=NOW))
     ids = [entry.find("a:id", NS).text for entry in feed.findall("a:entry", NS)]
 
-    assert ids == ["new@ifinavet.no", "middle@ifinavet.no", "old@ifinavet.no"]
+    assert ids == [
+        "tag:ifinavet.no,2026:job/new",
+        "tag:ifinavet.no,2026:job/middle",
+        "tag:ifinavet.no,2026:job/old",
+    ]
+
+
+def test_entry_ids_are_absolute_iris(settings):
+    """RFC 4287 requires an IRI, and readers key 'already seen' on this value."""
+    feed = parse(build_jobs_atom([make_job()], settings, now=NOW))
+
+    entry_id = feed.find("a:entry/a:id", NS).text
+    assert entry_id.startswith("tag:ifinavet.no,")
+    assert ":" in entry_id.split("tag:")[1]
 
 
 def test_entry_ids_are_stable_across_rebuilds(settings):

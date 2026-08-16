@@ -340,16 +340,26 @@ async def test_each_announcement_is_its_own_message():
     await notifier.aclose()
 
 
-async def test_a_burst_is_capped():
-    settings = make_settings(notify_webhook_url="https://hooks.slack.com/services/T/B/x", notify_max_items=2)
-    notifier = Notifier(settings)
-    hook = Webhook()
-    hook.attach(notifier)
+def test_a_burst_is_capped_per_refresh():
+    settings = make_settings(notify_max_items=2)
+    dataset = Dataset(job_listings=[make_job(f"job-{index}") for index in range(5)])
 
-    await notifier.deliver([announcement(str(index)) for index in range(50)])
+    assert len(plan(settings, dataset, bootstrapped(), now=NOW)) == 2
 
-    assert len(hook.bodies) == 2
-    await notifier.aclose()
+
+def test_a_capped_burst_is_deferred_rather_than_dropped():
+    """The overflow must arrive later, not be marked announced and lost."""
+    settings = make_settings(notify_max_items=2)
+    dataset = Dataset(job_listings=[make_job(f"job-{index}") for index in range(5)])
+    state = bootstrapped()
+
+    delivered: list[str] = []
+    for _ in range(4):
+        delivered.extend(a.key for a in plan(settings, dataset, state, now=NOW))
+
+    assert sorted(delivered) == [f"job:job-{index}" for index in range(5)]
+    # And once drained, it goes quiet rather than looping.
+    assert plan(settings, dataset, state, now=NOW) == []
 
 
 async def test_nothing_is_sent_without_a_configured_webhook():
@@ -397,4 +407,19 @@ async def test_the_webhook_secret_is_never_logged(caplog):
 
     assert "sUpErSeCrEt" not in caplog.text
     assert "hooks.slack.com" in caplog.text
+    await notifier.aclose()
+
+
+async def test_userinfo_credentials_are_never_logged(caplog):
+    """A URL may carry user:password@, which netloc would have carried into the log."""
+    settings = make_settings(notify_webhook_url="https://alice:hunter2@hooks.example.com/a/b")
+    notifier = Notifier(settings)
+    Webhook(status=500).attach(notifier)
+
+    with caplog.at_level("WARNING"):
+        await notifier.deliver([announcement()])
+
+    assert "hunter2" not in caplog.text
+    assert "alice" not in caplog.text
+    assert "hooks.example.com" in caplog.text
     await notifier.aclose()

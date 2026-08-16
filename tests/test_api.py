@@ -220,8 +220,8 @@ def test_jobs_atom_lists_every_listing_including_expired(client):
     feed = fromstring(client.get("/jobs.xml").content)
     ids = {element.text for element in feed.iter("{http://www.w3.org/2005/Atom}id")}
 
-    assert "job-active@ifinavet.no" in ids
-    assert "job-expired@ifinavet.no" in ids
+    assert "tag:ifinavet.no,2026:job/job-active" in ids
+    assert "tag:ifinavet.no,2026:job/job-expired" in ids
 
 
 # ---- events --------------------------------------------------------------

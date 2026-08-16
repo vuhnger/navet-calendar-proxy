@@ -11,6 +11,9 @@ STAGING=/srv/navet-ics/staging
 APP_DIR=/opt/navet-ics
 APP_USER=navet-ics
 HEALTH_URL=http://127.0.0.1:8000/readyz
+# The nginx files this deploy owns. The site config is deliberately absent: see
+# the note further down.
+SNIPPETS=(navet-ics-proxy.conf navet-ics-locations.conf)
 
 log() { printf '==> %s\n' "$*"; }
 
@@ -28,6 +31,7 @@ done
 
 log "Snapshotting current release for rollback"
 ROLLBACK="$(mktemp -d /srv/navet-ics/rollback.XXXXXX)"
+mkdir -p "$ROLLBACK/snippets"
 cp -a "$APP_DIR/src" "$ROLLBACK/src"
 cp -a "$APP_DIR/pyproject.toml" "$APP_DIR/uv.lock" "$ROLLBACK/"
 
@@ -43,10 +47,25 @@ rollback() {
     cp -a "$ROLLBACK/pyproject.toml" "$ROLLBACK/uv.lock" "$APP_DIR/"
     ( cd "$APP_DIR" && uv sync --frozen --no-dev --quiet ) || true
     chown -R root:"$APP_USER" "$APP_DIR" || true
+    # A snippet that failed nginx -t must not be left on disk. nginx is still
+    # running the old config because the reload never happened, but the next
+    # reload from anywhere at all (certbot renews unattended) would pick the
+    # broken file up and fail then instead.
+    restore_snippets
     systemctl restart navet-ics.service || true
     rm -rf "$ROLLBACK"
     exit 1
 }
+
+restore_snippets() {
+    local snippet
+    for snippet in "${SNIPPETS[@]}"; do
+        if [[ -f "$ROLLBACK/snippets/$snippet" ]]; then
+            cp -a "$ROLLBACK/snippets/$snippet" "/etc/nginx/snippets/$snippet" || true
+        fi
+    done
+}
+
 trap rollback ERR
 
 log "Installing new release"
@@ -71,19 +90,22 @@ fi
 
 # Note what is *not* here: deploy/nginx.conf. Certbot rewrites the site file in
 # place, so copying ours over it would destroy the TLS configuration. Both
-# snippets below are ours alone, which is why routes live in one of them.
+# snippets are ours alone, which is why routes live in one of them.
 nginx_dirty=0
-for snippet in navet-ics-proxy.conf navet-ics-locations.conf; do
+for snippet in "${SNIPPETS[@]}"; do
     if ! cmp -s "$STAGING/deploy/$snippet" "/etc/nginx/snippets/$snippet"; then
         log "Updating nginx snippet $snippet"
+        if [[ -f "/etc/nginx/snippets/$snippet" ]]; then
+            cp -a "/etc/nginx/snippets/$snippet" "$ROLLBACK/snippets/$snippet"
+        fi
         cp "$STAGING/deploy/$snippet" "/etc/nginx/snippets/$snippet"
         nginx_dirty=1
     fi
 done
 if [[ $nginx_dirty -eq 1 ]]; then
     # A snippet that does not parse must not take the site down: nginx -t fails,
-    # the ERR trap rolls the release back, and the running nginx keeps its old
-    # config because reload never happens.
+    # the ERR trap restores the old snippets and rolls the release back, and the
+    # running nginx keeps its old config because reload never happens.
     nginx -t
     systemctl reload nginx
 fi

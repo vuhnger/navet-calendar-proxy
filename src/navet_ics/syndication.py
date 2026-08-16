@@ -69,7 +69,10 @@ def build_jobs_atom(
     for listing in newest_first[: settings.feed_max_items]:
         entry = ET.SubElement(feed, f"{{{ATOM_NS}}}entry")
         _text(entry, f"{{{ATOM_NS}}}title", f"{listing.title} hos {listing.company}")
-        _text(entry, f"{{{ATOM_NS}}}id", f"{listing.uid}@ifinavet.no")
+        # RFC 4287 wants an IRI here, and readers key their "already seen" state
+        # on it. A tag: URI is the standard way to mint one from an id that is
+        # not itself a URL, and it stays stable as long as the upstream id does.
+        _text(entry, f"{{{ATOM_NS}}}id", f"tag:ifinavet.no,2026:job/{listing.uid}")
         _text(entry, f"{{{ATOM_NS}}}updated", _rfc3339(listing.created))
         _text(entry, f"{{{ATOM_NS}}}published", _rfc3339(listing.created))
         ET.SubElement(

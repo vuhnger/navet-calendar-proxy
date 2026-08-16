@@ -15,7 +15,7 @@ import httpx
 import pytest
 
 from navet_ics.config import Settings
-from navet_ics.notify import Announcement, NotificationState, Notifier, plan
+from navet_ics.notify import JOB, REGISTRATION, Announcement, NotificationState, Notifier, plan
 from navet_ics.upstream import Dataset, NavetEvent, NavetJobListing
 
 NOW = datetime(2026, 8, 16, 12, 0, tzinfo=UTC)
@@ -274,6 +274,18 @@ def test_a_corrupt_state_file_reseeds_quietly_rather_than_flooding(tmp_path):
     assert plan(settings, dataset, notifier.state, now=NOW) == []
 
 
+@pytest.mark.parametrize("content", ["[1, 2, 3]", '"a string"', "null", "42", "{ not json at all"])
+def test_no_shape_of_broken_state_file_can_stop_the_service_starting(tmp_path, content):
+    """load() is called during startup, so anything it raises is a failed boot."""
+    settings = make_settings(state_dir=str(tmp_path))
+    (tmp_path / "notified.json").write_text(content)
+
+    notifier = Notifier(settings)
+    notifier.load()
+
+    assert notifier.state.bootstrapped is False
+
+
 def test_state_file_from_an_unknown_version_reseeds_quietly(tmp_path):
     settings = make_settings(state_dir=str(tmp_path))
     (tmp_path / "notified.json").write_text(json.dumps({"version": 99, "seen": ["job:job-1"]}))
@@ -287,8 +299,10 @@ def test_state_file_from_an_unknown_version_reseeds_quietly(tmp_path):
 # ---- delivery ------------------------------------------------------------
 
 
-def announcement(key: str = "job:job-1") -> Announcement:
-    return Announcement(key=key, text="Ny stillingsannonse fra Bekk", company="Bekk", title="X", url="https://x")
+def announcement(key: str = "job:job-1", kind: str = JOB) -> Announcement:
+    return Announcement(
+        key=key, kind=kind, text="Ny stillingsannonse fra Bekk", company="Bekk", title="X", url="https://x"
+    )
 
 
 class Webhook:
@@ -360,6 +374,84 @@ def test_a_capped_burst_is_deferred_rather_than_dropped():
     assert sorted(delivered) == [f"job:job-{index}" for index in range(5)]
     # And once drained, it goes quiet rather than looping.
     assert plan(settings, dataset, state, now=NOW) == []
+
+
+class RoutingWebhook:
+    """Records which URL each message went to."""
+
+    def __init__(self, failing: set[str] | None = None):
+        self.failing = failing or set()
+        self.sent: list[tuple[str, str]] = []
+
+    def handle(self, request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        if url in self.failing:
+            return httpx.Response(500)
+        self.sent.append((url, json.loads(request.content)["text"]))
+        return httpx.Response(200)
+
+    def attach(self, notifier: Notifier) -> None:
+        notifier._client = httpx.AsyncClient(transport=httpx.MockTransport(self.handle))
+
+
+JOBS_HOOK = "https://hooks.slack.com/services/T/B/jobs"
+BEDPRES_HOOK = "https://hooks.slack.com/services/T/B/bedpres"
+
+
+async def test_each_kind_goes_to_its_own_channel():
+    settings = make_settings(
+        notify_jobs_webhook_url=JOBS_HOOK,
+        notify_registration_webhook_url=BEDPRES_HOOK,
+    )
+    notifier = Notifier(settings)
+    hook = RoutingWebhook()
+    hook.attach(notifier)
+
+    await notifier.deliver([announcement("job:1", JOB), announcement("registration:1", REGISTRATION)])
+
+    assert {url for url, _ in hook.sent} == {JOBS_HOOK, BEDPRES_HOOK}
+    assert len(hook.sent) == 2
+    await notifier.aclose()
+
+
+async def test_a_kind_without_its_own_channel_uses_the_shared_one():
+    shared = "https://hooks.slack.com/services/T/B/shared"
+    settings = make_settings(notify_webhook_url=shared, notify_jobs_webhook_url=JOBS_HOOK)
+    notifier = Notifier(settings)
+    hook = RoutingWebhook()
+    hook.attach(notifier)
+
+    await notifier.deliver([announcement("job:1", JOB), announcement("registration:1", REGISTRATION)])
+
+    assert sorted(url for url, _ in hook.sent) == sorted([JOBS_HOOK, shared])
+    await notifier.aclose()
+
+
+async def test_one_dead_channel_does_not_silence_the_other():
+    settings = make_settings(
+        notify_jobs_webhook_url=JOBS_HOOK,
+        notify_registration_webhook_url=BEDPRES_HOOK,
+    )
+    notifier = Notifier(settings)
+    hook = RoutingWebhook(failing={JOBS_HOOK})
+    hook.attach(notifier)
+
+    await notifier.deliver([announcement("job:1", JOB), announcement("registration:1", REGISTRATION)])
+
+    assert [url for url, _ in hook.sent] == [BEDPRES_HOOK]
+    await notifier.aclose()
+
+
+async def test_a_kind_with_no_channel_at_all_is_skipped():
+    settings = make_settings(notify_jobs_webhook_url=JOBS_HOOK)
+    notifier = Notifier(settings)
+    hook = RoutingWebhook()
+    hook.attach(notifier)
+
+    await notifier.deliver([announcement("job:1", JOB), announcement("registration:1", REGISTRATION)])
+
+    assert [url for url, _ in hook.sent] == [JOBS_HOOK]
+    await notifier.aclose()
 
 
 async def test_nothing_is_sent_without_a_configured_webhook():

@@ -33,8 +33,20 @@ Two ways, and they complement each other.
 `https://navet.vuhnger.dev/jobs.xml` is an Atom feed of listings, newest posting
 first. Nothing to configure, and being pull-based it cannot miss anything.
 
-For a Slack or Discord channel, set `NOTIFY_WEBHOOK_URL` to an incoming webhook
-and each refresh posts one message per new listing:
+For Slack or Discord, point the service at incoming webhooks and each refresh
+posts one message per record. An incoming webhook is bound to a single channel,
+so the two kinds get a URL each:
+
+```
+NOTIFY_JOBS_WEBHOOK_URL=…          # job ads
+NOTIFY_REGISTRATION_WEBHOOK_URL=…  # bedpres registration openings
+```
+
+`NOTIFY_WEBHOOK_URL` is a fallback for any kind without its own, so setting only
+that sends both to the same place. Each kind is delivered independently: a dead
+job-ads webhook does not stop the bedpres channel from being told anything.
+
+The messages are one per new listing:
 
 ```
 Ny stillingsannonse fra Bekk

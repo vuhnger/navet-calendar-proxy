@@ -68,10 +68,24 @@ if ! cmp -s "$STAGING/deploy/navet-ics.service" /etc/systemd/system/navet-ics.se
     cp "$STAGING/deploy/navet-ics.service" /etc/systemd/system/navet-ics.service
     systemctl daemon-reload
 fi
-if ! cmp -s "$STAGING/deploy/navet-ics-proxy.conf" /etc/nginx/snippets/navet-ics-proxy.conf; then
-    log "Updating nginx proxy snippet"
-    cp "$STAGING/deploy/navet-ics-proxy.conf" /etc/nginx/snippets/navet-ics-proxy.conf
-    nginx -t && systemctl reload nginx
+
+# Note what is *not* here: deploy/nginx.conf. Certbot rewrites the site file in
+# place, so copying ours over it would destroy the TLS configuration. Both
+# snippets below are ours alone, which is why routes live in one of them.
+nginx_dirty=0
+for snippet in navet-ics-proxy.conf navet-ics-locations.conf; do
+    if ! cmp -s "$STAGING/deploy/$snippet" "/etc/nginx/snippets/$snippet"; then
+        log "Updating nginx snippet $snippet"
+        cp "$STAGING/deploy/$snippet" "/etc/nginx/snippets/$snippet"
+        nginx_dirty=1
+    fi
+done
+if [[ $nginx_dirty -eq 1 ]]; then
+    # A snippet that does not parse must not take the site down: nginx -t fails,
+    # the ERR trap rolls the release back, and the running nginx keeps its old
+    # config because reload never happens.
+    nginx -t
+    systemctl reload nginx
 fi
 
 log "Restarting service"

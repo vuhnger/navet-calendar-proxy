@@ -104,6 +104,14 @@ jobs:
             fi
           done
 
+          status="$(curl -sS --max-time 10 -o /tmp/jobs.xml -w '%{http_code}' "${PUBLIC_URL}/jobs.xml" || echo 000)"
+          if [ "${status}" = "200" ] && grep -q '<feed' /tmp/jobs.xml; then
+            echo "/jobs.xml: OK ($(grep -c '<entry' /tmp/jobs.xml) entries)"
+          else
+            echo "::error::${PUBLIC_URL}/jobs.xml returned HTTP ${status} and no Atom feed."
+            failed=1
+          fi
+
           for path in /api/events /api/companies /api/jobs /api/status /openapi.json /docs; do
             status="$(curl -sS --max-time 10 -o /dev/null -w '%{http_code}' "${PUBLIC_URL}${path}" || echo 000)"
             if [ "${status}" = "200" ]; then

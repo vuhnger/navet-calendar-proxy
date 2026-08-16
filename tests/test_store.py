@@ -194,6 +194,70 @@ async def test_corrupt_cache_file_is_ignored(tmp_path):
     await store.stop()
 
 
+async def test_refresh_announces_a_new_listing_exactly_once(store, monkeypatch):
+    """End-to-end: the first refresh seeds, a later new listing posts, then stops."""
+    import httpx
+
+    posted: list[dict] = []
+
+    def webhook(request: httpx.Request) -> httpx.Response:
+        import json as _json
+
+        posted.append(_json.loads(request.content))
+        return httpx.Response(200)
+
+    object.__setattr__(store._settings, "notify_webhook_url", "https://hooks.slack.com/services/T/B/x")
+    store._notifier._client = httpx.AsyncClient(transport=httpx.MockTransport(webhook))
+
+    stub_fetch(store, monkeypatch, make_events(3), make_jobs(1))
+    await store.refresh()
+    assert posted == [], "the first refresh must seed silently, not announce the backlog"
+
+    stub_fetch(store, monkeypatch, make_events(3), make_jobs(2))
+    await store.refresh()
+    assert len(posted) == 1
+    assert "Ny stillingsannonse fra Bekk" in posted[0]["text"]
+
+    # A refresh that turns up nothing new must stay quiet.
+    await store.refresh()
+    assert len(posted) == 1
+    await store.stop()
+
+
+async def test_a_broken_webhook_does_not_fail_the_refresh(store, monkeypatch):
+    import httpx
+
+    def boom(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("no route to host")
+
+    object.__setattr__(store._settings, "notify_webhook_url", "https://hooks.slack.com/services/T/B/x")
+    store._notifier._client = httpx.AsyncClient(transport=httpx.MockTransport(boom))
+
+    stub_fetch(store, monkeypatch, make_events(3), make_jobs(1))
+    await store.refresh()
+    stub_fetch(store, monkeypatch, make_events(3), make_jobs(2))
+
+    snapshot = await store.refresh()
+
+    assert snapshot.event_count == 3
+    assert store.last_error is None
+    await store.stop()
+
+
+async def test_jobs_atom_is_rebuilt_on_every_refresh(store, monkeypatch):
+    stub_fetch(store, monkeypatch, make_events(2), make_jobs(1))
+    await store.refresh()
+    first = store.jobs_atom
+
+    stub_fetch(store, monkeypatch, make_events(2), make_jobs(3))
+    await store.refresh()
+
+    assert first is not None
+    assert store.jobs_atom != first
+    assert store.jobs_atom.count(b"<entry") == 3
+    await store.stop()
+
+
 async def test_etag_is_derived_from_the_served_body(store, monkeypatch):
     stub_fetch(store, monkeypatch, make_events(3))
     first = await store.refresh()

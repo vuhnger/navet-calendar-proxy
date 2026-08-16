@@ -28,6 +28,8 @@ from pydantic import ValidationError
 from .config import Settings
 from .feed import build_calendar, build_jobs_calendar, build_registration_calendar
 from .models import DatasetDocument
+from .notify import Notifier, plan
+from .syndication import build_jobs_atom
 from .upstream import ConvexClient, Dataset, UpstreamCaches, UpstreamError, fetch_dataset
 
 log = logging.getLogger(__name__)
@@ -74,8 +76,10 @@ class FeedStore:
         self._settings = settings
         self._client = ConvexClient(settings)
         self._caches = UpstreamCaches()
+        self._notifier = Notifier(settings)
         self._document: DatasetDocument | None = None
         self._feeds: dict[str, Snapshot] = {}
+        self._jobs_atom: bytes | None = None
         self._lock = asyncio.Lock()
         self._task: asyncio.Task[None] | None = None
         self._stopping = asyncio.Event()
@@ -87,6 +91,7 @@ class FeedStore:
 
     async def start(self) -> None:
         self._load_from_disk()
+        self._notifier.load()
         self._task = asyncio.create_task(self._run(), name="navet-ics-refresh")
 
     async def stop(self) -> None:
@@ -97,6 +102,7 @@ class FeedStore:
             with contextlib.suppress(asyncio.CancelledError):
                 await self._task
         await self._client.aclose()
+        await self._notifier.aclose()
 
     # ---- state -----------------------------------------------------------
 
@@ -111,6 +117,11 @@ class FeedStore:
 
     def feed(self, key: str) -> Snapshot | None:
         return self._feeds.get(key)
+
+    @property
+    def jobs_atom(self) -> bytes | None:
+        """The job listings as an Atom document, or None before the first build."""
+        return self._jobs_atom
 
     @property
     def snapshot(self) -> Snapshot | None:
@@ -172,15 +183,27 @@ class FeedStore:
 
             self._document = document
             self._feeds = feeds
+            self._jobs_atom = build_jobs_atom(dataset.job_listings, self._settings, now=generated_at)
             self.last_success = generated_at
             self.last_error = None
             self._save_to_disk(document)
+
+            # Worked out under the lock so two refreshes cannot both decide the
+            # same listing is new, but delivered outside it: a slow webhook must
+            # not hold up the next request for the feed.
+            announcements = plan(self._settings, dataset, self._notifier.state, now=generated_at)
+            self._notifier.save()
 
             log.info(
                 "rebuilt: %s",
                 ", ".join(f"{key} {snap.event_count} events / {len(snap.body)} bytes" for key, snap in feeds.items()),
             )
-            return feeds[EVENTS_FEED]
+            snapshot = feeds[EVENTS_FEED]
+
+        if announcements:
+            # Never allowed to fail a refresh that has already published.
+            await self._notifier.deliver(announcements)
+        return snapshot
 
     async def _run(self) -> None:
         while not self._stopping.is_set():
@@ -231,8 +254,10 @@ class FeedStore:
             log.warning("cached state %s is not usable, ignoring: %s", path, exc)
             return False
 
+        dataset = document.to_domain()
         self._document = document
-        self._feeds = self._build(document.to_domain(), document.generated_at)
+        self._feeds = self._build(dataset, document.generated_at)
+        self._jobs_atom = build_jobs_atom(dataset.job_listings, self._settings, now=document.generated_at)
         # The mtime is a real success timestamp: it is when this data was last
         # built from live data. Treating it as such means a restart is immediately
         # ready (it is genuinely serving good data) and staleness still ages out

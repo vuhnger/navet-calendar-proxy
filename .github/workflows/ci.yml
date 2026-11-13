@@ -1,6 +1,4 @@
-# Single entry point: checks run on every push and PR, and a push to main that
-# passes them all deploys. Keeping the gate here rather than in the deploy
-# workflow means there is no way to reach production without passing.
+# Checks run on every push and PR. Deploys are manual, see README "Deploying".
 name: CI
 
 on:
@@ -46,9 +44,3 @@ jobs:
       # The deploy scripts run as root on the server; a typo there is expensive.
       - run: shellcheck deploy/*.sh
 
-  deploy:
-    name: Deploy
-    needs: [lint, test, shellcheck]
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-    uses: ./.github/workflows/deploy.yml
-    secrets: inherit

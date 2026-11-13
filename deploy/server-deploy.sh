@@ -48,7 +48,7 @@ rollback() {
     rm -rf "$APP_DIR/src"
     cp -a "$ROLLBACK/src" "$APP_DIR/src"
     cp -a "$ROLLBACK/pyproject.toml" "$ROLLBACK/uv.lock" "$APP_DIR/"
-    ( cd "$APP_DIR" && uv sync --frozen --no-dev --quiet ) || true
+    ( cd "$APP_DIR" && UV_PYTHON_DOWNLOADS=never uv sync --frozen --no-dev --quiet --python /usr/bin/python3.12 ) || true
     chown -R root:"$APP_USER" "$APP_DIR" || true
     # A snippet that failed nginx -t must not be left on disk. nginx is still
     # running the old config because the reload never happened, but the next
@@ -83,7 +83,7 @@ cp "$STAGING/pyproject.toml" "$STAGING/uv.lock" "$STAGING/README.md" "$APP_DIR/"
 
 log "Syncing dependencies from uv.lock"
 # --frozen refuses to re-resolve, so the server gets exactly what CI tested.
-( cd "$APP_DIR" && uv sync --frozen --no-dev --quiet )
+( cd "$APP_DIR" && UV_PYTHON_DOWNLOADS=never uv sync --frozen --no-dev --quiet --python /usr/bin/python3.12 )
 
 chown -R root:"$APP_USER" "$APP_DIR"
 chmod -R go-w "$APP_DIR"

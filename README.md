@@ -200,11 +200,11 @@ tags but does not decode entities.
 
 ## Operating it
 
-Hosted on NREC at `158.37.66.4` (`ssh exp`), behind nginx with a Let's Encrypt
+Hosted at `ics.vuhnger.dev` (`ssh vuhnger`), behind nginx with a Let's Encrypt
 certificate that renews automatically via `certbot.timer`.
 
 ```bash
-ssh exp
+ssh vuhnger
 sudo systemctl status navet-ics          # service state
 sudo journalctl -u navet-ics -f          # logs
 curl -s localhost:8000/api/status | jq   # is the data fresh, and what did the last refresh do?
@@ -225,11 +225,10 @@ working default — see [`.env.example`](.env.example) for the full list.
 
 ## Deploying
 
-Pushing to `main` runs the checks and, if they pass, deploys automatically
-(`.github/workflows/`). CI rsyncs the repo to a staging directory on the server
-and invokes one root-owned script, `/usr/local/bin/navet-ics-deploy`, which the
-deploy account may run via a single-command sudo rule and cannot itself modify.
-That script snapshots the current release, installs the new one, restarts, waits
+Pushing to `main` runs the checks only. To deploy, rsync the repo to
+`/srv/navet-ics/staging/` on the server and run
+`sudo /usr/local/bin/navet-ics-deploy`, the root-owned copy of
+`deploy/server-deploy.sh`. That script snapshots the current release, installs the new one, restarts, waits
 for `/readyz`, and **rolls back automatically** if readiness is never reached.
 
 First-time provisioning of a fresh host:

@@ -51,7 +51,7 @@ cp "$SRC_DIR/pyproject.toml" "$SRC_DIR/uv.lock" "$SRC_DIR/README.md" "$APP_DIR/"
 
 echo "==> Syncing dependencies from uv.lock"
 # --frozen fails rather than silently re-resolving, so the server matches CI exactly.
-( cd "$APP_DIR" && uv sync --frozen --no-dev --quiet )
+( cd "$APP_DIR" && UV_PYTHON_DOWNLOADS=never uv sync --frozen --no-dev --quiet --python /usr/bin/python3.12 )
 
 # The service account only needs to read the code, never to modify it.
 chown -R root:"$APP_USER" "$APP_DIR"
